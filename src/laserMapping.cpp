@@ -190,24 +190,25 @@ void publish_frame_world(
     laserCloudmsg.header.frame_id = "camera_init";
     pubLaserCloudFullRes->publish(laserCloudmsg);
 
-    //--------------------------save map-----------------------------------
-    // 1. make sure you have enough memories
-    // 2. noted that pcd save will influence the real-time performances
-    if (pcd_save_en) {
-      *pcl_wait_save += *feats_down_world;
+  }
 
-      static int scan_wait_num = 0;
-      scan_wait_num++;
-      if (!pcl_wait_save->empty() && pcd_save_interval > 0 && scan_wait_num >= pcd_save_interval) {
-        pcd_index++;
-        string all_points_dir(
-          string(string(ROOT_DIR) + "PCD/scans_") + to_string(pcd_index) + string(".pcd"));
-        pcl::PCDWriter pcd_writer;
-        std::cout << "current scan saved to /PCD/" << all_points_dir << '\n';
-        pcd_writer.writeBinary(all_points_dir, *pcl_wait_save);
-        pcl_wait_save->clear();
-        scan_wait_num = 0;
-      }
+  //--------------------------save map-----------------------------------
+  // 1. make sure you have enough memories
+  // 2. noted that pcd save will influence the real-time performances
+  if (pcd_save_en) {
+    *pcl_wait_save += *feats_down_world;
+
+    static int scan_wait_num = 0;
+    scan_wait_num++;
+    if (!pcl_wait_save->empty() && pcd_save_interval > 0 && scan_wait_num >= pcd_save_interval) {
+      pcd_index++;
+      string all_points_dir(
+        string(string(ROOT_DIR) + "PCD/scans_") + to_string(pcd_index) + string(".pcd"));
+      pcl::PCDWriter pcd_writer;
+      std::cout << "current scan saved to /PCD/" << all_points_dir << '\n';
+      pcd_writer.writeBinary(all_points_dir, *pcl_wait_save);
+      pcl_wait_save->clear();
+      scan_wait_num = 0;
     }
   }
 }
@@ -385,7 +386,9 @@ int main(int argc, char ** argv)
     nh->create_publisher<sensor_msgs::msg::PointCloud2>("cloud_registered_body", 20);
   auto pub_laser_cloud_effect =
     nh->create_publisher<sensor_msgs::msg::PointCloud2>("cloud_effected", 20);
-  auto pub_laser_cloud_map = nh->create_publisher<sensor_msgs::msg::PointCloud2>("Laser_map", 20);
+  auto map_qos = rclcpp::QoS(rclcpp::KeepLast(1)).transient_local();
+  auto pub_laser_cloud_map =
+    nh->create_publisher<sensor_msgs::msg::PointCloud2>("Laser_map", map_qos);
   auto pub_odom_aft_mapped =
     nh->create_publisher<nav_msgs::msg::Odometry>("aft_mapped_to_init", 20);
   auto pub_path = nh->create_publisher<nav_msgs::msg::Path>("path", 20);

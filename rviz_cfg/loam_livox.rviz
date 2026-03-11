@@ -140,7 +140,7 @@ Visualization Manager:
           Color: 255; 0; 0
           Color Transformer: FlatColor
           Decay Time: 0
-          Enabled: false
+          Enabled: true
           Invert Rainbow: false
           Max Color: 255; 255; 255
           Min Color: 0; 0; 0
@@ -192,7 +192,7 @@ Visualization Manager:
             Shaft Length: 0.05000000074505806
             Shaft Radius: 0.05000000074505806
             Value: Axes
-          Topic: /Odometry
+          Topic: /aft_mapped_to_init
           Unreliable: false
           Value: true
       Enabled: true
