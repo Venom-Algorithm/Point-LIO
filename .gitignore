@@ -1,0 +1,6 @@
+# Ignore all PCD files in PCD directory
+PCD/*.pcd
+
+# Ignore Python cache files
+**/__pycache__/
+*.py[cod]

@@ -18,6 +18,7 @@ using namespace std;
 #define PUBFRAME_PERIOD (20)
 
 const float MOV_THRESHOLD = 1.5f;
+constexpr int MAP_PUBLISH_FRAME_INTERVAL = 20;
 
 string root_dir = ROOT_DIR;
 
@@ -35,6 +36,7 @@ PointCloudXYZI::Ptr feats_undistort(new PointCloudXYZI());
 PointCloudXYZI::Ptr feats_down_body_space(new PointCloudXYZI());
 PointCloudXYZI::Ptr init_feats_world(new PointCloudXYZI());
 std::deque<PointCloudXYZI::Ptr> depth_feats_world;
+extern PointCloudXYZI::Ptr pcl_wait_save;
 pcl::VoxelGrid<PointType> downSizeFilterSurf;
 pcl::VoxelGrid<PointType> downSizeFilterMap;
 
@@ -177,6 +179,19 @@ void publish_init_map(
   pubLaserCloudFullRes->publish(laserCloudmsg);
 }
 
+void publish_global_map(
+  const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr & pubLaserCloudMap)
+{
+  if (pcl_wait_save->empty()) {
+    return;
+  }
+  sensor_msgs::msg::PointCloud2 laserCloudmsg;
+  pcl::toROSMsg(*pcl_wait_save, laserCloudmsg);
+  laserCloudmsg.header.stamp = get_ros_time(lidar_end_time);
+  laserCloudmsg.header.frame_id = "camera_init";
+  pubLaserCloudMap->publish(laserCloudmsg);
+}
+
 PointCloudXYZI::Ptr pcl_wait_pub(new PointCloudXYZI(500000, 1));
 PointCloudXYZI::Ptr pcl_wait_save(new PointCloudXYZI());
 void publish_frame_world(
@@ -205,8 +220,14 @@ void publish_frame_world(
       string all_points_dir(
         string(string(ROOT_DIR) + "PCD/scans_") + to_string(pcd_index) + string(".pcd"));
       pcl::PCDWriter pcd_writer;
-      std::cout << "current scan saved to /PCD/" << all_points_dir << '\n';
-      pcd_writer.writeBinary(all_points_dir, *pcl_wait_save);
+      const int ret = pcd_writer.writeBinary(all_points_dir, *pcl_wait_save);
+      if (ret == 0) {
+        RCLCPP_INFO(
+          LOGGER, "PCD saved successfully: %s (points=%zu)", all_points_dir.c_str(),
+          pcl_wait_save->size());
+      } else {
+        RCLCPP_ERROR(LOGGER, "Failed to save PCD: %s", all_points_dir.c_str());
+      }
       pcl_wait_save->clear();
       scan_wait_num = 0;
     }
@@ -397,6 +418,7 @@ int main(int argc, char ** argv)
   //------------------------------------------------------------------------------------------------------
   signal(SIGINT, SigHandle);
   rclcpp::Rate rate(500);
+  int map_publish_frame_count = 0;
   while (rclcpp::ok()) {
     if (flg_exit) break;
     executor.spin_some();
@@ -524,11 +546,13 @@ int main(int argc, char ** argv)
         if (init_feats_world->size() >= init_map_size) {
           if (enable_prior_pcd) {
             auto map_cloud = loadPointcloudFromPcd(prior_pcd_map_path);
-            ivox_->AddPoints(map_cloud->points);
+            if (map_cloud != nullptr) {
+              ivox_->AddPoints(map_cloud->points);
+            }
           } else {
             ivox_->AddPoints(init_feats_world->points);
           }
-          publish_init_map(pub_laser_cloud_map);
+          publish_global_map(pub_laser_cloud_map);
           init_feats_world.reset(new PointCloudXYZI());
           init_map = true;
         } else {
@@ -976,9 +1000,15 @@ int main(int argc, char ** argv)
           sleep_time++;
           if (sleep_time > 200) {
             MapIncremental();
+            map_publish_frame_count++;
           }
         } else {
           MapIncremental();
+          map_publish_frame_count++;
+        }
+        if (map_publish_frame_count >= MAP_PUBLISH_FRAME_INTERVAL) {
+          publish_global_map(pub_laser_cloud_map);
+          map_publish_frame_count = 0;
         }
       }
       t5 = omp_get_wtime();
@@ -1037,7 +1067,14 @@ int main(int argc, char ** argv)
     string file_name = string("scans.pcd");
     string all_points_dir(string(string(ROOT_DIR) + "PCD/") + file_name);
     pcl::PCDWriter pcd_writer;
-    pcd_writer.writeBinary(all_points_dir, *pcl_wait_save);
+    const int ret = pcd_writer.writeBinary(all_points_dir, *pcl_wait_save);
+    if (ret == 0) {
+      RCLCPP_INFO(
+        LOGGER, "Final PCD saved successfully on shutdown: %s (points=%zu)",
+        all_points_dir.c_str(), pcl_wait_save->size());
+    } else {
+      RCLCPP_ERROR(LOGGER, "Failed to save final PCD on shutdown: %s", all_points_dir.c_str());
+    }
   }
   fout_out.close();
   fout_imu_pbp.close();
