@@ -37,7 +37,7 @@ def generate_launch_description():
     )
     declare_frame_id = DeclareLaunchArgument(
         "frame_id",
-        default_value="camera_init",
+        default_value="map",
         description="Frame id used for the published cloud",
     )
     declare_cloud_topic = DeclareLaunchArgument(
@@ -60,7 +60,7 @@ def generate_launch_description():
             {
                 "file_name": pcd_file,
                 "interval": interval,
-                "frame_id": frame_id,
+                "tf_frame": frame_id,
             }
         ],
         remappings=[("cloud_pcd", cloud_topic)],
