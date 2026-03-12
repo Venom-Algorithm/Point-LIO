@@ -30,7 +30,7 @@ def generate_launch_description():
     )
 
     declare_rviz = DeclareLaunchArgument(
-        "rviz", default_value="True", description="Flag to launch RViz."
+        "rviz", default_value="False", description="Flag to launch RViz."
     )
 
     declare_point_lio_cfg_dir = DeclareLaunchArgument(
