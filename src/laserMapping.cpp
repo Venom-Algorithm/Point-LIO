@@ -50,6 +50,47 @@ int sleep_time = 0;
 
 auto LOGGER = rclcpp::get_logger("laserMapping");
 
+M3D BuildYawOnlyRotation(const double yaw)
+{
+  return Eigen::AngleAxisd(yaw, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+}
+
+void Apply2DConstraint(state_input & state)
+{
+  if (!enable_2d_mode) {
+    return;
+  }
+  const V3D euler = SO3ToEuler(state.rot);
+  state.rot = SO3(BuildYawOnlyRotation(euler(2)));
+  state.pos(2) = 0.0;
+  state.vel(2) = 0.0;
+}
+
+void Apply2DConstraint(state_output & state)
+{
+  if (!enable_2d_mode) {
+    return;
+  }
+  const V3D euler = SO3ToEuler(state.rot);
+  state.rot = SO3(BuildYawOnlyRotation(euler(2)));
+  state.pos(2) = 0.0;
+  state.vel(2) = 0.0;
+  state.omg(0) = 0.0;
+  state.omg(1) = 0.0;
+}
+
+void Apply2DConstraintToCurrentState()
+{
+  if (!enable_2d_mode) {
+    return;
+  }
+  if (use_imu_as_input) {
+    Apply2DConstraint(kf_input.x_);
+  } else {
+    Apply2DConstraint(kf_output.x_);
+  }
+}
+
 void SigHandle(int sig)
 {
   flg_exit = true;
@@ -211,7 +252,18 @@ void publish_frame_world(
   // 1. make sure you have enough memories
   // 2. noted that pcd save will influence the real-time performances
   if (pcd_save_en) {
-    *pcl_wait_save += *feats_down_world;
+    // Keep Laser_map/PCD accumulation density consistent with filter_size_map.
+    PointCloudXYZI::Ptr downsampled_frame(new PointCloudXYZI());
+    downSizeFilterMap.setInputCloud(feats_down_world);
+    downSizeFilterMap.filter(*downsampled_frame);
+
+    *pcl_wait_save += *downsampled_frame;
+
+    // Further downsample accumulated map to suppress cross-frame duplicates.
+    PointCloudXYZI::Ptr downsampled_map(new PointCloudXYZI());
+    downSizeFilterMap.setInputCloud(pcl_wait_save);
+    downSizeFilterMap.filter(*downsampled_map);
+    *pcl_wait_save = *downsampled_map;
 
     static int scan_wait_num = 0;
     scan_wait_num++;
@@ -262,6 +314,11 @@ void set_posestamp(T & out)
     out.position.y = kf.x_.pos(1);
     out.position.z = kf.x_.pos(2);
     Eigen::Quaterniond q(kf.x_.rot);
+    if (enable_2d_mode) {
+      const V3D euler = SO3ToEuler(kf.x_.rot);
+      q = Eigen::Quaterniond(BuildYawOnlyRotation(euler(2)));
+      out.position.z = 0.0;
+    }
     out.orientation.x = q.coeffs()[0];
     out.orientation.y = q.coeffs()[1];
     out.orientation.z = q.coeffs()[2];
@@ -288,21 +345,28 @@ void publish_odometry(
   const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr & pubOdomAftMapped,
   std::shared_ptr<tf2_ros::TransformBroadcaster> & tf_br)
 {
+  Apply2DConstraintToCurrentState();
   odomAftMapped.header.frame_id = "odom";
-  odomAftMapped.child_frame_id = "body";
+  odomAftMapped.child_frame_id = "base_link";
   if (publish_odometry_without_downsample) {
     odomAftMapped.header.stamp = get_ros_time(time_current);
   } else {
     odomAftMapped.header.stamp = get_ros_time(lidar_end_time);
   }
   set_posestamp(odomAftMapped.pose.pose);
+  if (enable_2d_mode) {
+    odomAftMapped.pose.pose.position.z = 0.0;
+    odomAftMapped.twist.twist.linear.z = 0.0;
+    odomAftMapped.twist.twist.angular.x = 0.0;
+    odomAftMapped.twist.twist.angular.y = 0.0;
+  }
 
   pubOdomAftMapped->publish(odomAftMapped);
 
   if (tf_send_en) {
     geometry_msgs::msg::TransformStamped transform;
     transform.header.frame_id = "odom";
-    transform.child_frame_id = "laser_link";
+    transform.child_frame_id = "base_link";
     transform.transform.translation.x = odomAftMapped.pose.pose.position.x;
     transform.transform.translation.y = odomAftMapped.pose.pose.position.y;
     transform.transform.translation.z = odomAftMapped.pose.pose.position.z;
@@ -524,6 +588,8 @@ int main(int argc, char ** argv)
           p_imu->Set_init(tmp_gravity, rot_init);
           kf_input.x_.rot = rot_init;
           kf_output.x_.rot = rot_init;
+          Apply2DConstraint(kf_input.x_);
+          Apply2DConstraint(kf_output.x_);
           // kf_input.x_.rot; //.normalize();
           // kf_output.x_.rot; //.normalize();
           kf_output.x_.acc = -rot_init.transpose() * kf_output.x_.gravity;
@@ -654,6 +720,7 @@ int main(int argc, char ** argv)
                 /*** covariance update ***/
                 double dt = get_time_sec(imu_next.header.stamp) - time_predict_last_const;
                 kf_output.predict(dt, Q_output, input_in, true, false);
+                Apply2DConstraint(kf_output.x_);
                 time_predict_last_const = get_time_sec(imu_next.header.stamp);  // big problem
 
                 {
@@ -664,10 +731,12 @@ int main(int argc, char ** argv)
                     double propag_imu_start = omp_get_wtime();
 
                     kf_output.predict(dt_cov, Q_output, input_in, false, true);
+                    Apply2DConstraint(kf_output.x_);
 
                     propag_time += omp_get_wtime() - propag_imu_start;
                     double solve_imu_start = omp_get_wtime();
                     kf_output.update_iterated_dyn_share_IMU();
+                    Apply2DConstraint(kf_output.x_);
                     solve_time += omp_get_wtime() - solve_imu_start;
                   }
                 }
@@ -688,10 +757,12 @@ int main(int argc, char ** argv)
               double dt_cov = time_current - time_update_last;
               if (dt_cov > 0.0) {
                 kf_output.predict(dt_cov, Q_output, input_in, false, true);
+                Apply2DConstraint(kf_output.x_);
                 time_update_last = time_current;
               }
             }
             kf_output.predict(dt, Q_output, input_in, true, false);
+            Apply2DConstraint(kf_output.x_);
             propag_time += omp_get_wtime() - propag_state_start;
             time_predict_last_const = time_current;
             double t_update_start = omp_get_wtime();
@@ -705,6 +776,7 @@ int main(int argc, char ** argv)
               idx = idx + time_seq[k];
               continue;
             }
+            Apply2DConstraint(kf_output.x_);
             solve_start = omp_get_wtime();
 
             if (publish_odometry_without_downsample) {
@@ -775,12 +847,14 @@ int main(int argc, char ** argv)
                 double dt = time_current - time_predict_last_const;
                 {
                   double dt_cov = time_current - time_update_last;
-                  if (dt_cov > 0.0) {
-                    kf_output.predict(dt_cov, Q_output, input_in, false, true);
-                    time_update_last = time_current;
-                  }
-                  kf_output.predict(dt, Q_output, input_in, true, false);
+                if (dt_cov > 0.0) {
+                  kf_output.predict(dt_cov, Q_output, input_in, false, true);
+                  Apply2DConstraint(kf_output.x_);
+                  time_update_last = time_current;
                 }
+                kf_output.predict(dt, Q_output, input_in, true, false);
+                Apply2DConstraint(kf_output.x_);
+              }
 
                 time_predict_last_const = time_current;
 
@@ -790,6 +864,7 @@ int main(int argc, char ** argv)
                   imu_next.linear_acceleration.z;
                 // acc_avr_norm = acc_avr * G_m_s2 / acc_norm;
                 kf_output.update_iterated_dyn_share_IMU();
+                Apply2DConstraint(kf_output.x_);
                 imu_deque.pop_front();
                 if (imu_deque.empty()) break;
                 imu_last = imu_next;
@@ -847,9 +922,11 @@ int main(int argc, char ** argv)
               double dt_cov = get_time_sec(imu_last.header.stamp) - time_update_last;
               if (dt_cov > 0.0) {
                 kf_input.predict(dt_cov, Q_input, input_in, false, true);
+                Apply2DConstraint(kf_input.x_);
                 time_update_last = get_time_sec(imu_last.header.stamp);  //time_current;
               }
               kf_input.predict(dt, Q_input, input_in, true, false);
+              Apply2DConstraint(kf_input.x_);
               t_last = get_time_sec(imu_last.header.stamp);
               imu_prop_cov = true;
 
@@ -869,10 +946,12 @@ int main(int argc, char ** argv)
               double dt_cov = time_current - time_update_last;
               if (dt_cov > 0.0) {
                 kf_input.predict(dt_cov, Q_input, input_in, false, true);
+                Apply2DConstraint(kf_input.x_);
                 time_update_last = time_current;
               }
             }
             kf_input.predict(dt, Q_input, input_in, true, false);
+            Apply2DConstraint(kf_input.x_);
 
             propag_time += omp_get_wtime() - propag_start;
 
@@ -888,6 +967,7 @@ int main(int argc, char ** argv)
               idx = idx + time_seq[k];
               continue;
             }
+            Apply2DConstraint(kf_input.x_);
 
             solve_start = omp_get_wtime();
 
@@ -989,6 +1069,7 @@ int main(int argc, char ** argv)
       // geoQuat = tf::createQuaternionMsgFromRollPitchYaw
       //                     (euler_cur(0), euler_cur(1), euler_cur(2));
       /******* Publish odometry downsample *******/
+      Apply2DConstraintToCurrentState();
       if (!publish_odometry_without_downsample) {
         publish_odometry(pub_odom_laser_link, tf_broadcaster);
       }

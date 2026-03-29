@@ -61,11 +61,13 @@
         odometry:
             publish_odometry_without_downsample: False
 
+            enable_2d_mode: False                          # True: constrain z/roll/pitch to zero, keep x/y/yaw
+
         publish:
             path_en: True                                   # False: close the path output
             scan_publish_en: True                           # False: close all the point cloud output
             scan_bodyframe_pub_en: False                    # True: output the point cloud scans in IMU-body-frame
-            tf_send_en: False                               # True: send transform from 'odom' to 'laser_link'
+            tf_send_en: False                               # True: send transform from 'odom' to 'base_link'
 
         pcd_save:
             pcd_save_en: False

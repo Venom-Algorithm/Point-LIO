@@ -15,6 +15,7 @@ std::string lid_topic, imu_topic;
 bool prop_at_freq_of_imu = true, check_satu = true, con_frame = false, cut_frame = false;
 bool use_imu_as_input = false, space_down_sample = true,
      publish_odometry_without_downsample = false;
+bool enable_2d_mode = false;
 int init_map_size = 10, con_frame_num = 1;
 double match_s = 81, satu_acc, satu_gyro, cut_frame_time_interval = 0.1;
 float plane_thr = 0.1f;
@@ -198,6 +199,8 @@ void readParameters(std::shared_ptr<rclcpp::Node> & nh)
     nh->declare_parameter<bool>("odometry.publish_odometry_without_downsample", false);
     nh->get_parameter(
       "odometry.publish_odometry_without_downsample", publish_odometry_without_downsample);
+    nh->declare_parameter<bool>("odometry.enable_2d_mode", false);
+    nh->get_parameter("odometry.enable_2d_mode", enable_2d_mode);
 
     nh->declare_parameter<bool>("publish.path_en", true);
     nh->get_parameter("publish.path_en", path_en);
