@@ -50,7 +50,8 @@ extern bool enable_2d_mode;
 extern int init_map_size, con_frame_num;
 extern double match_s, satu_acc, satu_gyro, cut_frame_time_interval;
 extern float plane_thr;
-extern double filter_size_surf_min, filter_size_map_min, fov_deg;
+extern double filter_size_surf_min, filter_size_map_internal, filter_size_map_publish,
+  filter_size_map_save, fov_deg;
 // extern double cube_len;
 extern float DET_RANGE;
 extern bool imu_en;
@@ -59,10 +60,17 @@ extern double laser_point_cov, acc_norm;
 extern double acc_cov_input, gyr_cov_input, vel_cov;
 extern double gyr_cov_output, acc_cov_output, b_gyr_cov, b_acc_cov;
 extern double imu_meas_acc_cov, imu_meas_omg_cov;
-extern int lidar_type, pcd_save_interval;
+extern int lidar_type;
 extern std::vector<double> gravity_init, gravity;
-extern bool runtime_pos_log, pcd_save_en, path_en;
-extern bool scan_pub_en, scan_body_pub_en, tf_send_en;
+extern bool runtime_pos_log, pcd_save_en, path_en, save_on_shutdown;
+extern double pcd_save_period_sec;
+extern std::string pcd_save_path;
+extern bool scan_pub_en, scan_body_pub_en, tf_send_en, map_pub_en;
+extern int map_publish_interval;
+extern std::string odom_topic, cloud_registered_topic, cloud_registered_body_topic, map_topic,
+  path_topic;
+extern std::string odom_frame_id, base_frame_id, cloud_registered_frame_id,
+  cloud_registered_body_frame_id, map_frame_id;
 extern shared_ptr<Preprocess> p_pre;
 extern shared_ptr<ImuProcess> p_imu;
 extern bool is_first_frame;

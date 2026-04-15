@@ -92,6 +92,9 @@ public:
   /// get nn in cloud
   bool GetClosestPoint(const PointVector & cloud, PointVector & closest_cloud);
 
+  /// export all stored points
+  void CollectPoints(PointVector & points) const;
+
   /// get number of points
   size_t NumPoints() const;
 
@@ -274,6 +277,19 @@ bool IVox<dim, node_type, PointType>::GetClosestPoint(
     }
   };
   return true;
+}
+
+template <int dim, IVoxNodeType node_type, typename PointType>
+void IVox<dim, node_type, PointType>::CollectPoints(PointVector & points) const
+{
+  points.clear();
+  for (const auto & grid_pair : grids_cache_) {
+    const auto & node = grid_pair.second;
+    const std::size_t node_size = node.Size();
+    for (std::size_t i = 0; i < node_size; ++i) {
+      points.emplace_back(node.GetPoint(i));
+    }
+  }
 }
 
 template <int dim, IVoxNodeType node_type, typename PointType>

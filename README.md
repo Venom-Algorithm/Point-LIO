@@ -104,59 +104,46 @@ Clone the repository and build with colcon:
 
 ## 5. Directly run
 
-### 5.1 For Avia
-Connect to your PC to Livox Avia LiDAR by following  [Livox-ros-driver installation](https://github.com/Livox-SDK/livox_ros_driver), then
+This repository is configured for Livox MID360 only.
+
+Connect the MID360 and start its ROS 2 driver first. Then run Point-LIO with one of the built-in MID360 launch files:
+
 ```
-    cd ~/$Point_LIO_ROS_DIR$
-    source devel/setup.bash
-    roslaunch point_lio mapping_avia.launch
-    roslaunch livox_ros_driver livox_lidar_msg.launch
-```
-- For livox serials, Point-LIO only support the data collected by the ``` livox_lidar_msg.launch ``` since only its ``` livox_ros_driver/CustomMsg ``` data structure produces the timestamp of each LiDAR point which is very important for Point-LIO. ``` livox_lidar.launch ``` can not produce it right now.
-- If you want to change the frame rate, please modify the **publish_freq** parameter in the [livox_lidar_msg.launch](https://github.com/Livox-SDK/livox_ros_driver/blob/master/livox_ros_driver/launch/livox_lidar_msg.launch) of [Livox-ros-driver](https://github.com/Livox-SDK/livox_ros_driver) before make the livox_ros_driver pakage.
-
-### 5.2 For Livox serials with external IMU
-
-mapping_avia.launch theratically supports mid-70, mid-40 or other livox serial LiDAR, but need to setup some parameters befor run:
-
-Edit ``` config/avia.yaml ``` to set the below parameters:
-
-1. LiDAR point cloud topic name: ``` lid_topic ```
-2. IMU topic name: ``` imu_topic ```
-3. Translational extrinsic: ``` extrinsic_T ```
-4. Rotational extrinsic: ``` extrinsic_R ``` (only support rotation matrix)
-- The extrinsic parameters in Point-LIO is defined as the LiDAR's pose (position and rotation matrix) in IMU body frame (i.e. the IMU is the base frame). They can be found in the official manual.
-5. Saturation value of IMU's accelerator and gyroscope: ```satu_acc```, ```satu_gyro```
-6. The norm of IMU's acceleration according to unit of acceleration messages: ``` acc_norm ```
-
-### 5.3 For Velodyne or Ouster (Velodyne as an example)
-
-Step A: Setup before run
-
-Edit ``` config/velodyne.yaml ``` to set the below parameters:
-
-1. LiDAR point cloud topic name: ``` lid_topic ```
-2. IMU topic name: ``` imu_topic ``` (both internal and external, 6-aixes or 9-axies are fine)
-3. Set the parameter ```timestamp_unit``` based on the unit of **time** (Velodyne) or **t** (Ouster) field in PoindCloud2 rostopic
-4. Line number (we tested 16, 32 and 64 line, but not tested 128 or above): ``` scan_line ```
-5. Translational extrinsic: ``` extrinsic_T ```
-6. Rotational extrinsic: ``` extrinsic_R ``` (only support rotation matrix)
-- The extrinsic parameters in Point-LIO is defined as the LiDAR's pose (position and rotation matrix) in IMU body frame (i.e. the IMU is the base frame).
-7. Saturation value of IMU's accelerator and gyroscope: ```satu_acc```, ```satu_gyro```
-8. The norm of IMU's acceleration according to unit of acceleration messages: ``` acc_norm ```
-
-Step B: Run below
-```
-    cd ~/$Point_LIO_ROS_DIR$
-    source devel/setup.bash
-    roslaunch point_lio mapping_velody16.launch
+    ros2 launch point_lio point_lio.launch.py
 ```
 
-Step C: Run LiDAR's ros driver or play rosbag.
+or
+
+```
+    ros2 launch point_lio mapping.launch.py
+```
+
+The MID360 parameters are maintained in:
+
+1. `config/mid360.yaml`
+2. `config/mid360_mapping.yaml`
+
+The main fields to adjust before deployment are:
+
+1. LiDAR point cloud topic name: `common.lid_topic`
+2. IMU topic name: `common.imu_topic`
+3. Translational extrinsic: `mapping.extrinsic_T`
+4. Rotational extrinsic: `mapping.extrinsic_R`
+5. Saturation value of IMU's accelerator and gyroscope: `mapping.satu_acc`, `mapping.satu_gyro`
+6. The norm of IMU's acceleration according to unit of acceleration messages: `mapping.acc_norm`
+7. Input point sampling: `point_filter_num`
+8. Online scan/map downsampling: `filter_size_surf`, `filter_size_map_internal`, `filter_size_map_publish`, `filter_size_map_save`
 
 ### 5.4 PCD file save
 
-Set ``` pcd_save_enable ``` in launchfile to ``` 1 ```. All the scans (in global frame) will be accumulated and saved to the file ``` Point-LIO/PCD/scans.pcd ``` after the Point-LIO is terminated. ```pcl_viewer scans.pcd``` can visualize the point clouds.
+Use the YAML parameters under `pcd_save`:
+
+1. `pcd_save.pcd_save_en`: enable or disable PCD export
+2. `pcd_save.save_on_shutdown`: save once on normal exit / Ctrl+C
+3. `pcd_save.save_period_sec`: periodic save interval in seconds, `0.0` disables periodic save
+4. `pcd_save.save_path`: output path of the exported PCD
+
+The exported map comes from the internal online map rather than the low-frequency visualization topic. `pcl_viewer scans.pcd` can visualize the point clouds.
 
 *Tips for pcl_viewer:*
 - change what to visualize/color by pressing keyboard 1,2,3,4,5 when pcl_viewer is running. 
@@ -169,8 +156,6 @@ Set ``` pcd_save_enable ``` in launchfile to ``` 1 ```. All the scans (in global
 ```
 
 # **6. Examples**
-
-The example datasets could be downloaded through [onedrive](https://connecthkuhk-my.sharepoint.com/:f:/g/personal/hdj65822_connect_hku_hk/EmRJYy4ZfAlMiIJ786ogCPoBcGQ2BAchuXjE5oJQjrQu0Q?e=igu44W). Pay attention that if you want to test on racing_drone.bag, [0.0, 9.810, 0.0] should be input in 'mapping/gravity_init' in avia.yaml, and set the 'start_in_aggressive_motion' as true in the yaml. Because this bag start from a high speed motion. And for PULSAR.bag, we change the measuring range of the gyroscope of the built-in IMU to 17.5 rad/s. Therefore, when you test on this bag, please change 'satu_gyro' to 17.5 in avia.yaml.
 
 ## **6.1. Example-1: SLAM on datasets with aggressive motions where IMU is saturated**
 <div align="center">
