@@ -7,8 +7,8 @@
         point_filter_num: 3                                 # Keep one point out of every N raw input points during preprocessing.
         space_down_sample: True                             # True enables voxel downsampling on the current scan before registration.
         filter_size_surf: 0.2                               # Voxel size for current-scan downsampling; smaller values keep more registration detail.
-        filter_size_map_internal: 0.5                       # Map voxel size used by the internal online map that supports registration.
-        filter_size_map_publish: 0.8                        # Voxel size used only by the low-frequency visualization map topic.
+        filter_size_map_internal: 0.2                       # Map voxel size used by the internal online map that supports registration.
+        filter_size_map_publish: 0.5                        # Voxel size used only by the low-frequency visualization map topic.
         filter_size_map_save: 0.2                           # Voxel size used only when exporting the internal map to PCD.
         ivox_nearby_type: 6                                 # Neighbor search mode in iVox: 0=center, 6/18/26 expand the search neighborhood.
         runtime_pos_log_enable: False                       # True writes runtime pose/debug logs to the log directory.
