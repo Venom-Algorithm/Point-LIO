@@ -203,6 +203,8 @@ void publish_init_map(
   pubLaserCloudFullRes->publish(laserCloudmsg);
 }
 
+PointCloudXYZI::Ptr pcl_wait_pub(new PointCloudXYZI(500000, 1));
+
 void publish_global_map(
   const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr & pubLaserCloudMap)
 {
@@ -219,7 +221,6 @@ void publish_global_map(
   pubLaserCloudMap->publish(laserCloudmsg);
 }
 
-PointCloudXYZI::Ptr pcl_wait_pub(new PointCloudXYZI(500000, 1));
 void reset_map_publish_cache(const PointCloudXYZI::Ptr & source_cloud)
 {
   if (!map_pub_en || source_cloud == nullptr || source_cloud->empty()) {
