@@ -20,11 +20,6 @@
             cut_frame_time_interval: 0.1                    # should be integral fraction of 1 / LiDAR frequency
             time_diff_lidar_to_imu: 0.0                     # Time offset between LiDAR and IMU calibrated by other algorithms, e.g., LI-Init (find in Readme)
 
-        prior_pcd:
-            enable: False
-            prior_pcd_map_path: ""
-            init_pose: [ 0.0, 0.0, 0.0 ]
-
         preprocess:
             lidar_type: 1                                   # 1 for Livox serials LiDAR, 2 for Velodyne LiDAR, 3 for ouster LiDAR
             scan_line: 4
@@ -70,6 +65,6 @@
             tf_send_en: True                                # True: send transform from 'odom' to 'base_link'
 
         pcd_save:
-            pcd_save_en: True
+            pcd_save_en: False
             interval: -1                                    # how many LiDAR frames saved in each pcd file;
                                                             # -1 : all frames will be saved in ONE pcd file, may lead to memory crash when having too much frames.

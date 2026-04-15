@@ -46,8 +46,6 @@ nav_msgs::msg::Path path;
 nav_msgs::msg::Odometry odomAftMapped;
 geometry_msgs::msg::PoseStamped msg_body_pose;
 
-int sleep_time = 0;
-
 auto LOGGER = rclcpp::get_logger("laserMapping");
 
 M3D BuildYawOnlyRotation(const double yaw)
@@ -96,19 +94,6 @@ void SigHandle(int sig)
   flg_exit = true;
   RCLCPP_WARN(LOGGER, "catch sig %d", sig);
   sig_buffer.notify_all();
-}
-
-PointCloudXYZI::Ptr loadPointcloudFromPcd(const std::string & file_path)
-{
-  auto pcd_ptr = std::make_shared<PointCloudXYZI>();
-
-  if (pcl::io::loadPCDFile(file_path, *pcd_ptr) == -1) {
-    RCLCPP_ERROR(LOGGER, "Couldn't read pcd file %s", file_path.c_str());
-    return nullptr;
-  }
-
-  RCLCPP_INFO(LOGGER, "Loaded %zu points from %s", pcd_ptr->size(), file_path.c_str());
-  return pcd_ptr;
 }
 
 inline void dump_lio_state_to_log(FILE * fp)
@@ -299,16 +284,13 @@ void publish_frame_body(
   sensor_msgs::msg::PointCloud2 laserCloudmsg;
   pcl::toROSMsg(*laserCloudIMUBody, laserCloudmsg);
   laserCloudmsg.header.stamp = get_ros_time(lidar_end_time);
-  laserCloudmsg.header.frame_id = "body";
+  laserCloudmsg.header.frame_id = "base_link";
   pubLaserCloudFull_body->publish(laserCloudmsg);
 }
 
 template <typename T>
 void set_posestamp(T & out)
 {
-  // Static variable, initialized to true, only effective on the first call
-  static bool is_first_kf = true;
-
   auto set_output_from_kf = [&](const auto & kf) {
     out.position.x = kf.x_.pos(0);
     out.position.y = kf.x_.pos(1);
@@ -326,16 +308,7 @@ void set_posestamp(T & out)
   };
 
   if (!use_imu_as_input) {
-    if (enable_prior_pcd && is_first_kf) {
-      // Execute only on the first call
-      kf_output.x_.pos(0) = init_pose[0];
-      kf_output.x_.pos(1) = init_pose[1];
-      kf_output.x_.pos(2) = init_pose[2];
-      set_output_from_kf(kf_output);
-      is_first_kf = false;  // Set is_first_kf to false after the first call
-    } else {
-      set_output_from_kf(kf_output);
-    }
+    set_output_from_kf(kf_output);
   } else {
     set_output_from_kf(kf_input);
   }
@@ -473,9 +446,9 @@ int main(int argc, char ** argv)
     nh->create_publisher<sensor_msgs::msg::PointCloud2>("cloud_effected", 20);
   auto map_qos = rclcpp::QoS(rclcpp::KeepLast(1)).transient_local();
   auto pub_laser_cloud_map =
-    nh->create_publisher<sensor_msgs::msg::PointCloud2>("Laser_map", map_qos);
+    nh->create_publisher<sensor_msgs::msg::PointCloud2>("map_cloud", map_qos);
   auto pub_odom_laser_link =
-    nh->create_publisher<nav_msgs::msg::Odometry>("laser_link_to_init", 20);
+    nh->create_publisher<nav_msgs::msg::Odometry>("odom", 20);
   auto pub_path = nh->create_publisher<nav_msgs::msg::Path>("path", 20);
   auto tf_broadcaster = std::make_shared<tf2_ros::TransformBroadcaster>(nh);
 
@@ -610,14 +583,7 @@ int main(int argc, char ** argv)
         }
 
         if (init_feats_world->size() >= init_map_size) {
-          if (enable_prior_pcd) {
-            auto map_cloud = loadPointcloudFromPcd(prior_pcd_map_path);
-            if (map_cloud != nullptr) {
-              ivox_->AddPoints(map_cloud->points);
-            }
-          } else {
-            ivox_->AddPoints(init_feats_world->points);
-          }
+          ivox_->AddPoints(init_feats_world->points);
           publish_global_map(pub_laser_cloud_map);
           init_feats_world.reset(new PointCloudXYZI());
           init_map = true;
@@ -1077,16 +1043,8 @@ int main(int argc, char ** argv)
       /*** add the feature points to map ***/
       t3 = omp_get_wtime();
       if (feats_down_size > 4) {
-        if (enable_prior_pcd) {
-          sleep_time++;
-          if (sleep_time > 200) {
-            MapIncremental();
-            map_publish_frame_count++;
-          }
-        } else {
-          MapIncremental();
-          map_publish_frame_count++;
-        }
+        MapIncremental();
+        map_publish_frame_count++;
         if (map_publish_frame_count >= MAP_PUBLISH_FRAME_INTERVAL) {
           publish_global_map(pub_laser_cloud_map);
           map_publish_frame_count = 0;
