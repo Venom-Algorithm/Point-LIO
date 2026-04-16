@@ -643,8 +643,8 @@ int main(int argc, char ** argv)
       t2 = omp_get_wtime();
 
       /*** iterated state estimation ***/
-      crossmat_list.reserve(feats_down_size);
-      pbody_list.reserve(feats_down_size);
+      crossmat_list.resize(feats_down_size);
+      pbody_list.resize(feats_down_size);
       // pbody_ext_list.reserve(feats_down_size);
 
       for (size_t i = 0; i < feats_down_body->size(); i++) {

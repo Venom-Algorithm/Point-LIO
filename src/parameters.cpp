@@ -300,6 +300,8 @@ void readParameters(std::shared_ptr<rclcpp::Node> & nh)
     ivox_options_.nearby_type_ = IVoxType::NearbyType::NEARBY18;
   }
   p_imu->gravity_ << VEC_FROM_ARRAY(gravity);
+  RCLCPP_INFO(
+    nh->get_logger(), "Using fixed LiDAR->IMU time offset: %.6f s", time_diff_lidar_to_imu);
 }
 
 Eigen::Matrix<double, 3, 1> SO3ToEuler(const SO3 & rot)

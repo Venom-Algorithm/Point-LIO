@@ -158,7 +158,8 @@ void imu_cbk(const sensor_msgs::msg::Imu::ConstSharedPtr & msg_in)
   // publish_count ++;
 
   msg->header.stamp = get_ros_time(
-    get_time_sec(msg_in->header.stamp) - timediff_imu_wrt_lidar - time_lag_IMU_wtr_lidar);
+    get_time_sec(msg_in->header.stamp) - timediff_imu_wrt_lidar - time_diff_lidar_to_imu -
+    time_lag_IMU_wtr_lidar);
 
   double timestamp = get_time_sec(msg->header.stamp);
   // printf("time_diff%f, %f, %f\n", last_timestamp_imu - timestamp, last_timestamp_imu, timestamp);
