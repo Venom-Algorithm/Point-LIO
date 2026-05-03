@@ -20,6 +20,7 @@ extern int frame_ct, wait_num;
 extern std::deque<PointCloudXYZI::Ptr> lidar_buffer;
 extern std::deque<double> time_buffer;
 extern std::deque<sensor_msgs::msg::Imu::ConstSharedPtr> imu_deque;
+extern uint64_t lidar_buffer_drop_count, imu_buffer_drop_count;
 extern std::mutex m_time;
 extern bool lidar_pushed, imu_pushed;
 extern double imu_first_time;

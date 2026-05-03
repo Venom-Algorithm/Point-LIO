@@ -10,6 +10,21 @@
 
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
+#include <rclcpp/serialization.hpp>
+#include <rclcpp/serialized_message.hpp>
+#include <rosbag2_cpp/reader.hpp>
+#include <rosbag2_storage/serialized_bag_message.hpp>
+#include <rosbag2_storage/storage_options.hpp>
+#include <rosbag2_transport/reader_writer_factory.hpp>
+
+#include <algorithm>
+#include <condition_variable>
+#include <deque>
+#include <filesystem>
+#include <memory>
+#include <mutex>
+#include <thread>
+#include <utility>
 
 #include "li_initialization.h"
 
@@ -45,6 +60,306 @@ nav_msgs::msg::Odometry odomAftMapped;
 geometry_msgs::msg::PoseStamped msg_body_pose;
 
 auto LOGGER = rclcpp::get_logger("laserMapping");
+
+struct MapFrameSnapshot
+{
+  double stamp = 0.0;
+  PointCloudXYZI::Ptr world_cloud;
+  PointCloudXYZI::Ptr body_cloud;
+  geometry_msgs::msg::PoseStamped pose;
+};
+
+std::string resolve_output_path(const std::string & output_path)
+{
+  if (output_path.empty() || output_path.front() == '/') {
+    return output_path;
+  }
+  return std::string(ROOT_DIR) + output_path;
+}
+
+void ensure_parent_directory(const std::string & output_path)
+{
+  const auto parent_path = std::filesystem::path(output_path).parent_path();
+  if (parent_path.empty()) {
+    return;
+  }
+  try {
+    std::filesystem::create_directories(parent_path);
+  } catch (const std::exception & e) {
+    RCLCPP_WARN(
+      LOGGER, "Failed to create PCD output directory '%s': %s", parent_path.string().c_str(),
+      e.what());
+  }
+}
+
+bool save_cloud_to_pcd(
+  const PointCloudXYZI::Ptr & cloud, pcl::VoxelGrid<PointType> & save_filter,
+  const std::string & output_path)
+{
+  if (cloud == nullptr || cloud->empty()) {
+    RCLCPP_WARN(LOGGER, "Skip PCD save because the map cloud is empty.");
+    return false;
+  }
+
+  PointCloudXYZI::Ptr downsampled_map(new PointCloudXYZI());
+  save_filter.setInputCloud(cloud);
+  save_filter.filter(*downsampled_map);
+
+  const std::string full_path = resolve_output_path(output_path);
+  ensure_parent_directory(full_path);
+  pcl::PCDWriter pcd_writer;
+  const int ret = pcd_writer.writeBinary(full_path, *downsampled_map);
+  if (ret == 0) {
+    RCLCPP_INFO(
+      LOGGER, "PCD saved successfully: %s (points=%zu)", full_path.c_str(),
+      downsampled_map->size());
+    return true;
+  }
+
+  RCLCPP_ERROR(LOGGER, "Failed to save PCD: %s", full_path.c_str());
+  return false;
+}
+
+class AsyncMapWorker
+{
+public:
+  AsyncMapWorker(
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_pub,
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr body_cloud_pub,
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr map_pub,
+    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub)
+  : cloud_pub_(std::move(cloud_pub)),
+    body_cloud_pub_(std::move(body_cloud_pub)),
+    map_pub_(std::move(map_pub)),
+    path_pub_(std::move(path_pub)),
+    queue_depth_(std::max(1, async_map_queue_depth)),
+    accumulated_map_(new PointCloudXYZI())
+  {
+    map_filter_.setLeafSize(
+      filter_size_map_publish, filter_size_map_publish, filter_size_map_publish);
+    save_filter_.setLeafSize(filter_size_map_save, filter_size_map_save, filter_size_map_save);
+    path_.header.frame_id = odom_frame_id;
+  }
+
+  ~AsyncMapWorker() { stop(); }
+
+  void start()
+  {
+    running_ = true;
+    worker_ = std::thread(&AsyncMapWorker::run, this);
+  }
+
+  void stop()
+  {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!running_) {
+        return;
+      }
+      running_ = false;
+    }
+    cv_.notify_all();
+    if (worker_.joinable()) {
+      worker_.join();
+    }
+    if (pcd_save_en && save_on_shutdown) {
+      save_cloud_to_pcd(accumulated_map_, save_filter_, pcd_save_path);
+    }
+  }
+
+  void enqueue(MapFrameSnapshot && snapshot)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (queue_.size() >= static_cast<size_t>(queue_depth_)) {
+      queue_.pop_front();
+      dropped_jobs_++;
+    }
+    queue_.emplace_back(std::move(snapshot));
+    cv_.notify_one();
+  }
+
+  size_t queue_size() const
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return queue_.size();
+  }
+
+  uint64_t dropped_jobs() const
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return dropped_jobs_;
+  }
+
+private:
+  void run()
+  {
+    while (true) {
+      MapFrameSnapshot snapshot;
+      {
+        std::unique_lock<std::mutex> lock(mutex_);
+        cv_.wait(lock, [this]() { return !running_ || !queue_.empty(); });
+        if (!running_ && queue_.empty()) {
+          break;
+        }
+        snapshot = std::move(queue_.front());
+        queue_.pop_front();
+      }
+      process(snapshot);
+    }
+  }
+
+  void process(const MapFrameSnapshot & snapshot)
+  {
+    if (path_en) {
+      path_.header.stamp = get_ros_time(snapshot.stamp);
+      path_.poses.emplace_back(snapshot.pose);
+      path_pub_->publish(path_);
+    }
+
+    if (scan_pub_en && snapshot.world_cloud && !snapshot.world_cloud->empty()) {
+      sensor_msgs::msg::PointCloud2 msg;
+      pcl::toROSMsg(*snapshot.world_cloud, msg);
+      msg.header.stamp = get_ros_time(snapshot.stamp);
+      msg.header.frame_id = cloud_registered_frame_id;
+      cloud_pub_->publish(msg);
+    }
+
+    if (scan_pub_en && scan_body_pub_en && snapshot.body_cloud && !snapshot.body_cloud->empty()) {
+      sensor_msgs::msg::PointCloud2 msg;
+      pcl::toROSMsg(*snapshot.body_cloud, msg);
+      msg.header.stamp = get_ros_time(snapshot.stamp);
+      msg.header.frame_id = cloud_registered_body_frame_id;
+      body_cloud_pub_->publish(msg);
+    }
+
+    if (map_pub_en && snapshot.world_cloud && !snapshot.world_cloud->empty()) {
+      PointCloudXYZI::Ptr downsampled_frame(new PointCloudXYZI());
+      map_filter_.setInputCloud(snapshot.world_cloud);
+      map_filter_.filter(*downsampled_frame);
+      *accumulated_map_ += *downsampled_frame;
+
+      PointCloudXYZI::Ptr downsampled_map(new PointCloudXYZI());
+      map_filter_.setInputCloud(accumulated_map_);
+      map_filter_.filter(*downsampled_map);
+      accumulated_map_ = downsampled_map;
+
+      map_publish_count_++;
+      if (map_publish_count_ >= map_publish_interval) {
+        sensor_msgs::msg::PointCloud2 msg;
+        pcl::toROSMsg(*accumulated_map_, msg);
+        msg.header.stamp = get_ros_time(snapshot.stamp);
+        msg.header.frame_id = map_frame_id;
+        map_pub_->publish(msg);
+        map_publish_count_ = 0;
+      }
+    }
+
+    if (pcd_save_en && pcd_save_period_sec > 0.0) {
+      save_period_count_++;
+      const int frames_per_save =
+        std::max(1, static_cast<int>(std::round(pcd_save_period_sec / lidar_time_inte)));
+      if (save_period_count_ >= frames_per_save) {
+        save_cloud_to_pcd(accumulated_map_, save_filter_, pcd_save_path);
+        save_period_count_ = 0;
+      }
+    }
+  }
+
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr body_cloud_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr map_pub_;
+  rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
+  mutable std::mutex mutex_;
+  std::condition_variable cv_;
+  std::deque<MapFrameSnapshot> queue_;
+  std::thread worker_;
+  bool running_ = false;
+  int queue_depth_ = 1;
+  uint64_t dropped_jobs_ = 0;
+  int map_publish_count_ = 0;
+  int save_period_count_ = 0;
+  nav_msgs::msg::Path path_;
+  PointCloudXYZI::Ptr accumulated_map_;
+  pcl::VoxelGrid<PointType> map_filter_;
+  pcl::VoxelGrid<PointType> save_filter_;
+};
+
+std::string normalize_topic_name(const std::string & topic)
+{
+  size_t first_non_slash = topic.find_first_not_of('/');
+  if (first_non_slash == std::string::npos) {
+    return "";
+  }
+  return topic.substr(first_non_slash);
+}
+
+bool topic_matches(const std::string & configured_topic, const std::string & bag_topic)
+{
+  return normalize_topic_name(configured_topic) == normalize_topic_name(bag_topic);
+}
+
+template <typename MessageT>
+std::shared_ptr<MessageT> deserialize_bag_message(
+  const std::shared_ptr<rosbag2_storage::SerializedBagMessage> & bag_message)
+{
+  rclcpp::Serialization<MessageT> serializer;
+  auto message = std::make_shared<MessageT>();
+  rclcpp::SerializedMessage serialized_message(*bag_message->serialized_data);
+  serializer.deserialize_message(&serialized_message, message.get());
+  return message;
+}
+
+class OfflineBagFeeder
+{
+public:
+  bool open(const std::string & bag_path)
+  {
+    if (bag_path.empty()) {
+      RCLCPP_ERROR(LOGGER, "lio.offline.bag_path is empty.");
+      return false;
+    }
+    try {
+      rosbag2_storage::StorageOptions storage_options;
+      storage_options.uri = bag_path;
+      reader_ = rosbag2_transport::ReaderWriterFactory::make_reader(storage_options);
+      reader_->open(storage_options);
+    } catch (const std::exception & e) {
+      RCLCPP_ERROR(LOGGER, "Failed to open rosbag2 '%s': %s", bag_path.c_str(), e.what());
+      return false;
+    }
+    RCLCPP_INFO(LOGGER, "Reading offline rosbag2: %s", bag_path.c_str());
+    return true;
+  }
+
+  bool has_next() { return reader_ && reader_->has_next(); }
+
+  bool feed_next()
+  {
+    if (!reader_ || !reader_->has_next()) {
+      return false;
+    }
+
+    auto bag_message = reader_->read_next();
+    if (topic_matches(imu_topic, bag_message->topic_name)) {
+      imu_cbk(deserialize_bag_message<sensor_msgs::msg::Imu>(bag_message));
+      return true;
+    }
+
+    if (topic_matches(lid_topic, bag_message->topic_name)) {
+      if (p_pre->lidar_type == AVIA) {
+        livox_pcl_cbk(deserialize_bag_message<livox_ros_driver2::msg::CustomMsg>(bag_message));
+      } else {
+        standard_pcl_cbk(deserialize_bag_message<sensor_msgs::msg::PointCloud2>(bag_message));
+      }
+      return true;
+    }
+
+    return true;
+  }
+
+private:
+  std::unique_ptr<rosbag2_cpp::Reader> reader_;
+};
 
 M3D BuildYawOnlyRotation(const double yaw)
 {
@@ -279,6 +594,7 @@ bool save_internal_map_to_pcd(const std::string & output_path)
   if (!output_path.empty() && output_path.front() != '/') {
     full_path = std::string(ROOT_DIR) + output_path;
   }
+  ensure_parent_directory(full_path);
 
   pcl::PCDWriter pcd_writer;
   const int ret = pcd_writer.writeBinary(full_path, *downsampled_map);
@@ -402,6 +718,36 @@ void publish_path(const rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubPat
   }
 }
 
+MapFrameSnapshot make_map_frame_snapshot(const double stamp, const bool include_body_cloud)
+{
+  MapFrameSnapshot snapshot;
+  snapshot.stamp = stamp;
+  snapshot.world_cloud.reset(new PointCloudXYZI(*feats_down_world));
+  snapshot.pose.header.stamp = get_ros_time(stamp);
+  snapshot.pose.header.frame_id = odom_frame_id;
+  set_posestamp(snapshot.pose.pose);
+
+  if (include_body_cloud) {
+    snapshot.body_cloud.reset(new PointCloudXYZI(feats_undistort->points.size(), 1));
+    for (size_t i = 0; i < feats_undistort->points.size(); i++) {
+      pointBodyLidarToIMU(&feats_undistort->points[i], &snapshot.body_cloud->points[i]);
+    }
+  }
+
+  return snapshot;
+}
+
+MapFrameSnapshot make_init_map_snapshot(const PointCloudXYZI::Ptr & init_map_cloud)
+{
+  MapFrameSnapshot snapshot;
+  snapshot.stamp = lidar_end_time;
+  snapshot.world_cloud.reset(new PointCloudXYZI(*init_map_cloud));
+  snapshot.pose.header.stamp = get_ros_time(lidar_end_time);
+  snapshot.pose.header.frame_id = odom_frame_id;
+  set_posestamp(snapshot.pose.pose);
+  return snapshot;
+}
+
 int main(int argc, char ** argv)
 {
   rclcpp::init(argc, argv);
@@ -464,17 +810,21 @@ int main(int argc, char ** argv)
   /*** ROS subscribe initialization ***/
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_pcl_pc;
   rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr sub_pcl_livox;
-  if (p_pre->lidar_type == AVIA) {
-    sub_pcl_livox = nh->create_subscription<livox_ros_driver2::msg::CustomMsg>(
-      lid_topic, rclcpp::SensorDataQoS(),
-      [](const livox_ros_driver2::msg::CustomMsg::SharedPtr msg) { livox_pcl_cbk(msg); });
-  } else {
-    sub_pcl_pc = nh->create_subscription<sensor_msgs::msg::PointCloud2>(
-      lid_topic, rclcpp::SensorDataQoS(),
-      [](const sensor_msgs::msg::PointCloud2::SharedPtr msg) { standard_pcl_cbk(msg); });
+  rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu;
+  const bool offline_mode = lio_operation_mode == "offline_map";
+  if (!offline_mode) {
+    if (p_pre->lidar_type == AVIA) {
+      sub_pcl_livox = nh->create_subscription<livox_ros_driver2::msg::CustomMsg>(
+        lid_topic, rclcpp::SensorDataQoS(),
+        [](const livox_ros_driver2::msg::CustomMsg::SharedPtr msg) { livox_pcl_cbk(msg); });
+    } else {
+      sub_pcl_pc = nh->create_subscription<sensor_msgs::msg::PointCloud2>(
+        lid_topic, rclcpp::SensorDataQoS(),
+        [](const sensor_msgs::msg::PointCloud2::SharedPtr msg) { standard_pcl_cbk(msg); });
+    }
+    sub_imu =
+      nh->create_subscription<sensor_msgs::msg::Imu>(imu_topic, rclcpp::SensorDataQoS(), imu_cbk);
   }
-  auto sub_imu =
-    nh->create_subscription<sensor_msgs::msg::Imu>(imu_topic, rclcpp::SensorDataQoS(), imu_cbk);
   auto pub_laser_cloud_full_res =
     nh->create_publisher<sensor_msgs::msg::PointCloud2>(cloud_registered_topic, 20);
   auto pub_laser_cloud_full_res_body =
@@ -488,16 +838,43 @@ int main(int argc, char ** argv)
     nh->create_publisher<nav_msgs::msg::Odometry>(odom_topic, 20);
   auto pub_path = nh->create_publisher<nav_msgs::msg::Path>(path_topic, 20);
   auto tf_broadcaster = std::make_shared<tf2_ros::TransformBroadcaster>(nh);
+  std::unique_ptr<AsyncMapWorker> async_map_worker;
+  if (lio_operation_mode == "online_odom_async_map") {
+    async_map_worker = std::make_unique<AsyncMapWorker>(
+      pub_laser_cloud_full_res, pub_laser_cloud_full_res_body, pub_laser_cloud_map, pub_path);
+    async_map_worker->start();
+  }
+  std::unique_ptr<OfflineBagFeeder> offline_feeder;
+  if (offline_mode) {
+    offline_feeder = std::make_unique<OfflineBagFeeder>();
+    if (!offline_feeder->open(offline_bag_path)) {
+      return 2;
+    }
+  }
 
   //------------------------------------------------------------------------------------------------------
   signal(SIGINT, SigHandle);
   rclcpp::Rate rate(500);
   int map_publish_frame_count = 0;
   int save_period_frame_count = 0;
+  uint64_t odom_overrun_count = 0;
+  double last_diag_time = omp_get_wtime();
   while (rclcpp::ok()) {
     if (flg_exit) break;
-    executor.spin_some();
-    if (sync_packages(Measures)) {
+    bool synced_measure = false;
+    if (offline_mode) {
+      while (!(synced_measure = sync_packages(Measures)) && offline_feeder->has_next()) {
+        offline_feeder->feed_next();
+      }
+      if (!synced_measure && !offline_feeder->has_next()) {
+        break;
+      }
+    } else {
+      executor.spin_some();
+      synced_measure = sync_packages(Measures);
+    }
+
+    if (synced_measure) {
       if (flg_reset) {
         RCLCPP_WARN(LOGGER, "reset when rosbag play back");
         p_imu->Reset();
@@ -622,7 +999,10 @@ int main(int argc, char ** argv)
 
         if (init_feats_world->size() >= init_map_size) {
           ivox_->AddPoints(init_feats_world->points);
-          if (map_pub_en) {
+          if (async_map_worker && map_pub_en) {
+            async_map_worker->enqueue(make_init_map_snapshot(init_feats_world));
+          } else if (lio_operation_mode != "online_odom" && lio_operation_mode != "offline_map" &&
+                     map_pub_en) {
             reset_map_publish_cache(init_feats_world);
             publish_global_map(pub_laser_cloud_map);
           }
@@ -1085,15 +1465,20 @@ int main(int argc, char ** argv)
       t3 = omp_get_wtime();
       if (feats_down_size > 4) {
         MapIncremental();
-        if (map_pub_en) {
+        if (async_map_worker) {
+          async_map_worker->enqueue(make_map_frame_snapshot(lidar_end_time, scan_body_pub_en));
+        } else if (
+          lio_operation_mode != "online_odom" && lio_operation_mode != "offline_map" && map_pub_en) {
           update_map_publish_cache();
+          map_publish_frame_count++;
+          if (map_pub_en && map_publish_frame_count >= map_publish_interval) {
+            publish_global_map(pub_laser_cloud_map);
+            map_publish_frame_count = 0;
+          }
         }
-        map_publish_frame_count++;
-        if (map_pub_en && map_publish_frame_count >= map_publish_interval) {
-          publish_global_map(pub_laser_cloud_map);
-          map_publish_frame_count = 0;
-        }
-        if (pcd_save_en && pcd_save_period_sec > 0.0) {
+        if (
+          pcd_save_en && pcd_save_period_sec > 0.0 && !async_map_worker &&
+          lio_operation_mode != "online_odom") {
           save_period_frame_count++;
           const int frames_per_save =
             std::max(1, static_cast<int>(std::round(pcd_save_period_sec / lidar_time_inte)));
@@ -1105,9 +1490,30 @@ int main(int argc, char ** argv)
       }
       t5 = omp_get_wtime();
       /******* Publish points *******/
-      if (path_en) publish_path(pub_path);
-      if (scan_pub_en) publish_frame_world(pub_laser_cloud_full_res);
-      if (scan_pub_en && scan_body_pub_en) publish_frame_body(pub_laser_cloud_full_res_body);
+      if (!async_map_worker && lio_operation_mode != "online_odom" && lio_operation_mode != "offline_map") {
+        if (path_en) publish_path(pub_path);
+        if (scan_pub_en) publish_frame_world(pub_laser_cloud_full_res);
+        if (scan_pub_en && scan_body_pub_en) publish_frame_body(pub_laser_cloud_full_res_body);
+      }
+
+      if ((t5 - t0) > lidar_time_inte) {
+        odom_overrun_count++;
+      }
+      const double diag_now = omp_get_wtime();
+      if (diag_now - last_diag_time > 2.0) {
+        const size_t async_queue_size = async_map_worker ? async_map_worker->queue_size() : 0;
+        const uint64_t async_dropped = async_map_worker ? async_map_worker->dropped_jobs() : 0;
+        RCLCPP_INFO(
+          LOGGER,
+          "Point-LIO diag mode=%s loop=%.4f map=%.4f lidar_q=%zu imu_q=%zu async_q=%zu "
+          "dropped_async=%llu dropped_lidar=%llu dropped_imu=%llu odom_overrun=%llu",
+          lio_operation_mode.c_str(), t5 - t0, t5 - t3, lidar_buffer.size(), imu_deque.size(),
+          async_queue_size, static_cast<unsigned long long>(async_dropped),
+          static_cast<unsigned long long>(lidar_buffer_drop_count),
+          static_cast<unsigned long long>(imu_buffer_drop_count),
+          static_cast<unsigned long long>(odom_overrun_count));
+        last_diag_time = diag_now;
+      }
 
       /*** Debug variables Logging ***/
       if (runtime_pos_log) {
@@ -1150,12 +1556,24 @@ int main(int argc, char ** argv)
         dump_lio_state_to_log(fp);
       }
     }
-    rate.sleep();
+    if (!offline_mode) {
+      rate.sleep();
+    }
   }
   //--------------------------save map-----------------------------------
   // 1. make sure you have enough memories
   // 2. noted that pcd save will influence the real-time performances
-  if (pcd_save_en && save_on_shutdown) {
+  if (async_map_worker) {
+    async_map_worker->stop();
+  }
+  if (
+    offline_mode && offline_map_save_on_finish &&
+    (pcd_save_path.empty() || pcd_save_path != offline_output_pcd_path)) {
+    pcd_save_path = offline_output_pcd_path;
+  }
+  if (
+    ((pcd_save_en && save_on_shutdown) || (offline_mode && offline_map_save_on_finish)) &&
+    lio_operation_mode != "online_odom_async_map") {
     save_internal_map_to_pcd(pcd_save_path);
   }
   fout_out.close();

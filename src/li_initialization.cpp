@@ -23,6 +23,43 @@ bool lidar_pushed = false, imu_pushed = false;
 std::deque<PointCloudXYZI::Ptr> lidar_buffer;
 std::deque<double> time_buffer;
 std::deque<sensor_msgs::msg::Imu::ConstSharedPtr> imu_deque;
+uint64_t lidar_buffer_drop_count = 0;
+uint64_t imu_buffer_drop_count = 0;
+
+namespace
+{
+
+void trim_lidar_buffer_if_needed()
+{
+  if (lio_operation_mode == "offline_map") {
+    return;
+  }
+  while (
+    realtime_max_lidar_queue > 0 &&
+    lidar_buffer.size() > static_cast<size_t>(realtime_max_lidar_queue) &&
+    !time_buffer.empty()) {
+    lidar_buffer.pop_front();
+    time_buffer.pop_front();
+    lidar_buffer_drop_count++;
+    lidar_pushed = false;
+  }
+}
+
+void trim_imu_buffer_if_needed()
+{
+  if (lio_operation_mode == "offline_map") {
+    return;
+  }
+  while (
+    realtime_max_imu_queue > 0 &&
+    imu_deque.size() > static_cast<size_t>(realtime_max_imu_queue)) {
+    imu_deque.pop_front();
+    imu_buffer_drop_count++;
+    imu_pushed = false;
+  }
+}
+
+}  // namespace
 
 void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::SharedPtr & msg)
 {
@@ -82,6 +119,7 @@ void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::SharedPtr & msg)
       }
     }
   }
+  trim_lidar_buffer_if_needed();
   s_plot11[scan_count] = omp_get_wtime() - preprocess_start_time;
   // mtx_buffer.unlock();
   // sig_buffer.notify_all();
@@ -145,6 +183,7 @@ void livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::SharedPtr & msg)
       }
     }
   }
+  trim_lidar_buffer_if_needed();
   s_plot11[scan_count] = omp_get_wtime() - preprocess_start_time;
   // mtx_buffer.unlock();
   // sig_buffer.notify_all();
@@ -176,6 +215,7 @@ void imu_cbk(const sensor_msgs::msg::Imu::ConstSharedPtr & msg_in)
   }
   imu_deque.emplace_back(msg);
   last_timestamp_imu = timestamp;
+  trim_imu_buffer_if_needed();
   // mtx_buffer.unlock();
   // sig_buffer.notify_all();
 }

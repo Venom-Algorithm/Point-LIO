@@ -1,11 +1,21 @@
 #include "parameters.h"
 
+#include <algorithm>
+
 bool is_first_frame = true;
 double lidar_end_time = 0.0, first_lidar_time = 0.0, time_con = 0.0;
 double last_timestamp_lidar = -1.0, last_timestamp_imu = -1.0;
 int pcd_index = 0;
 IVoxType::Options ivox_options_;
 int ivox_nearby_type = 6;
+std::string lio_operation_mode = "online_odom";
+int realtime_max_lidar_queue = 8;
+int realtime_max_imu_queue = 400;
+int async_map_queue_depth = 8;
+std::string async_map_drop_policy = "drop_oldest";
+std::string offline_bag_path;
+std::string offline_output_pcd_path = "PCD/offline_map.pcd";
+bool offline_map_save_on_finish = true;
 
 std::vector<double> extrinT(3, 0.0);
 std::vector<double> extrinR(9, 0.0);
@@ -65,6 +75,30 @@ void readParameters(std::shared_ptr<rclcpp::Node> & nh)
   p_pre.reset(new Preprocess());
   p_imu.reset(new ImuProcess());
   try {
+    nh->declare_parameter<std::string>("lio.operation_mode", "online_odom");
+    nh->get_parameter("lio.operation_mode", lio_operation_mode);
+
+    nh->declare_parameter<int>("lio.realtime.max_lidar_queue", 8);
+    nh->get_parameter("lio.realtime.max_lidar_queue", realtime_max_lidar_queue);
+
+    nh->declare_parameter<int>("lio.realtime.max_imu_queue", 400);
+    nh->get_parameter("lio.realtime.max_imu_queue", realtime_max_imu_queue);
+
+    nh->declare_parameter<int>("lio.async_map.queue_depth", 8);
+    nh->get_parameter("lio.async_map.queue_depth", async_map_queue_depth);
+
+    nh->declare_parameter<std::string>("lio.async_map.drop_policy", "drop_oldest");
+    nh->get_parameter("lio.async_map.drop_policy", async_map_drop_policy);
+
+    nh->declare_parameter<std::string>("lio.offline.bag_path", "");
+    nh->get_parameter("lio.offline.bag_path", offline_bag_path);
+
+    nh->declare_parameter<std::string>("lio.offline.output_pcd_path", "PCD/offline_map.pcd");
+    nh->get_parameter("lio.offline.output_pcd_path", offline_output_pcd_path);
+
+    nh->declare_parameter<bool>("lio.offline.save_on_finish", true);
+    nh->get_parameter("lio.offline.save_on_finish", offline_map_save_on_finish);
+
     nh->declare_parameter<bool>("prop_at_freq_of_imu", true);
     nh->get_parameter("prop_at_freq_of_imu", prop_at_freq_of_imu);
 
@@ -287,6 +321,39 @@ void readParameters(std::shared_ptr<rclcpp::Node> & nh)
     RCLCPP_ERROR(nh->get_logger(), "Exception: %s", e.what());
   }
 
+  if (
+    lio_operation_mode != "online_odom" && lio_operation_mode != "online_odom_async_map" &&
+    lio_operation_mode != "offline_map") {
+    RCLCPP_WARN(
+      nh->get_logger(), "Unknown lio.operation_mode '%s', falling back to online_odom.",
+      lio_operation_mode.c_str());
+    lio_operation_mode = "online_odom";
+  }
+
+  realtime_max_lidar_queue = std::max(1, realtime_max_lidar_queue);
+  realtime_max_imu_queue = std::max(1, realtime_max_imu_queue);
+  async_map_queue_depth = std::max(1, async_map_queue_depth);
+  map_publish_interval = std::max(1, map_publish_interval);
+  if (async_map_drop_policy != "drop_oldest") {
+    RCLCPP_WARN(
+      nh->get_logger(), "Unsupported lio.async_map.drop_policy '%s', using drop_oldest.",
+      async_map_drop_policy.c_str());
+    async_map_drop_policy = "drop_oldest";
+  }
+
+  if (lio_operation_mode == "online_odom") {
+    scan_pub_en = false;
+    scan_body_pub_en = false;
+    map_pub_en = false;
+    path_en = false;
+    pcd_save_en = false;
+    runtime_pos_log = false;
+  }
+
+  if (lio_operation_mode == "offline_map" && !offline_output_pcd_path.empty()) {
+    pcd_save_path = offline_output_pcd_path;
+  }
+
   if (ivox_nearby_type == 0) {
     ivox_options_.nearby_type_ = IVoxType::NearbyType::CENTER;
   } else if (ivox_nearby_type == 6) {
@@ -302,6 +369,10 @@ void readParameters(std::shared_ptr<rclcpp::Node> & nh)
   p_imu->gravity_ << VEC_FROM_ARRAY(gravity);
   RCLCPP_INFO(
     nh->get_logger(), "Using fixed LiDAR->IMU time offset: %.6f s", time_diff_lidar_to_imu);
+  RCLCPP_INFO(
+    nh->get_logger(), "Point-LIO mode: %s, lidar_queue=%d, imu_queue=%d, async_map_queue=%d",
+    lio_operation_mode.c_str(), realtime_max_lidar_queue, realtime_max_imu_queue,
+    async_map_queue_depth);
 }
 
 Eigen::Matrix<double, 3, 1> SO3ToEuler(const SO3 & rot)

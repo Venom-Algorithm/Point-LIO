@@ -12,6 +12,7 @@
 #include <Eigen/Eigen>
 #include <condition_variable>
 #include <csignal>
+#include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <geometry_msgs/msg/vector3.hpp>
@@ -40,6 +41,12 @@ extern double last_timestamp_lidar, last_timestamp_imu;
 extern int pcd_index;
 extern IVoxType::Options ivox_options_;
 extern int ivox_nearby_type;
+extern std::string lio_operation_mode;
+extern int realtime_max_lidar_queue, realtime_max_imu_queue;
+extern int async_map_queue_depth;
+extern std::string async_map_drop_policy;
+extern std::string offline_bag_path, offline_output_pcd_path;
+extern bool offline_map_save_on_finish;
 extern state_input state_in;
 extern state_output state_out;
 extern std::string lid_topic, imu_topic;
