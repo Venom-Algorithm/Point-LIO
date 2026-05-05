@@ -859,6 +859,7 @@ int main(int argc, char ** argv)
   int save_period_frame_count = 0;
   uint64_t odom_overrun_count = 0;
   double last_diag_time = omp_get_wtime();
+  bool initial_map_prompt_logged = false;
   while (rclcpp::ok()) {
     if (flg_exit) break;
     bool synced_measure = false;
@@ -987,6 +988,13 @@ int main(int argc, char ** argv)
       }
       /*** initialize the map ***/
       if (!init_map) {
+        if (!initial_map_prompt_logged) {
+          RCLCPP_INFO(
+            LOGGER,
+            "Building Point-LIO initial local map. Keep the LiDAR-IMU device stationary until "
+            "odometry tracking starts.");
+          initial_map_prompt_logged = true;
+        }
         feats_down_world->resize(feats_undistort->size());
         for (int i = 0; i < feats_undistort->size(); i++) {
           {
@@ -1008,6 +1016,10 @@ int main(int argc, char ** argv)
           }
           init_feats_world.reset(new PointCloudXYZI());
           init_map = true;
+          RCLCPP_INFO(
+            LOGGER,
+            "Point-LIO initial local map is ready. Odometry tracking has started; normal motion is "
+            "now allowed.");
         } else {
           init_map = false;
         }

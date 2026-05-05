@@ -65,6 +65,10 @@ void ImuProcess::IMU_init(const MeasureGroup & meas, int & N)
     Reset();
     N = 1;
     b_first_frame_ = false;
+    RCLCPP_INFO(
+      logger,
+      "Point-LIO IMU initialization started. Keep the LiDAR-IMU device stationary until "
+      "initialization reaches 100%%.");
     const auto & imu_acc = meas.imu.front()->linear_acceleration;
     const auto & gyr_acc = meas.imu.front()->angular_velocity;
     mean_acc << imu_acc.x, imu_acc.y, imu_acc.z;
@@ -98,6 +102,10 @@ void ImuProcess::Process(const MeasureGroup & meas, PointCloudXYZI::Ptr cur_pcl_
 
         if (init_iter_num > MAX_INI_COUNT) {
           RCLCPP_INFO(logger, "IMU Initializing: %.1f %%", 100.0);
+          RCLCPP_INFO(
+            logger,
+            "Point-LIO IMU initialization complete. Keep the device stationary while the "
+            "initial local map is built.");
           imu_need_init_ = false;
           *cur_pcl_un_ = *(meas.lidar);
         }
