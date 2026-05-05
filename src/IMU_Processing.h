@@ -36,7 +36,7 @@ public:
   ~ImuProcess();
 
   void Reset();
-  void Process(const MeasureGroup & meas, PointCloudXYZI::Ptr pcl_un_);
+  void Process(const MeasureGroup & meas, PointCloudXYZI::Ptr & pcl_un_);
   void set_gyr_cov(const V3D & scaler);
   void set_acc_cov(const V3D & scaler);
   void Set_init(Eigen::Vector3d & tmp_gravity, Eigen::Matrix3d & rot);

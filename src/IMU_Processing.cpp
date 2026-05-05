@@ -88,7 +88,7 @@ void ImuProcess::IMU_init(const MeasureGroup & meas, int & N)
   }
 }
 
-void ImuProcess::Process(const MeasureGroup & meas, PointCloudXYZI::Ptr cur_pcl_un_)
+void ImuProcess::Process(const MeasureGroup & meas, PointCloudXYZI::Ptr & cur_pcl_un_)
 {
   if (imu_en) {
     if (meas.imu.empty()) return;
@@ -107,17 +107,17 @@ void ImuProcess::Process(const MeasureGroup & meas, PointCloudXYZI::Ptr cur_pcl_
             "Point-LIO IMU initialization complete. Keep the device stationary while the "
             "initial local map is built.");
           imu_need_init_ = false;
-          *cur_pcl_un_ = *(meas.lidar);
+          cur_pcl_un_ = meas.lidar;
         }
-        // *cur_pcl_un_ = *(meas.lidar);
+        // cur_pcl_un_ is intentionally left unchanged until IMU initialization completes.
       }
       return;
     }
     if (!after_imu_init_) after_imu_init_ = true;
-    *cur_pcl_un_ = *(meas.lidar);
+    cur_pcl_un_ = meas.lidar;
     return;
   } else {
-    *cur_pcl_un_ = *(meas.lidar);
+    cur_pcl_un_ = meas.lidar;
     return;
   }
 }
