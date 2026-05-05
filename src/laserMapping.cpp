@@ -173,6 +173,11 @@ public:
     if (queue_.size() >= static_cast<size_t>(queue_depth_)) {
       queue_.pop_front();
       dropped_jobs_++;
+      RCLCPP_WARN(
+        LOGGER,
+        "Point-LIO async map warning: dropped old map job(s). dropped_async=%llu async_q=%zu "
+        "queue_depth=%d",
+        static_cast<unsigned long long>(dropped_jobs_), queue_.size(), queue_depth_);
     }
     queue_.emplace_back(std::move(snapshot));
     cv_.notify_one();
@@ -858,7 +863,6 @@ int main(int argc, char ** argv)
   int map_publish_frame_count = 0;
   int save_period_frame_count = 0;
   uint64_t odom_overrun_count = 0;
-  double last_diag_time = omp_get_wtime();
   bool initial_map_prompt_logged = false;
   while (rclcpp::ok()) {
     if (flg_exit) break;
@@ -1510,21 +1514,13 @@ int main(int argc, char ** argv)
 
       if ((t5 - t0) > lidar_time_inte) {
         odom_overrun_count++;
-      }
-      const double diag_now = omp_get_wtime();
-      if (diag_now - last_diag_time > 2.0) {
-        const size_t async_queue_size = async_map_worker ? async_map_worker->queue_size() : 0;
-        const uint64_t async_dropped = async_map_worker ? async_map_worker->dropped_jobs() : 0;
-        RCLCPP_INFO(
+        RCLCPP_WARN(
           LOGGER,
-          "Point-LIO diag mode=%s loop=%.4f map=%.4f lidar_q=%zu imu_q=%zu async_q=%zu "
-          "dropped_async=%llu dropped_lidar=%llu dropped_imu=%llu odom_overrun=%llu",
-          lio_operation_mode.c_str(), t5 - t0, t5 - t3, lidar_buffer.size(), imu_deque.size(),
-          async_queue_size, static_cast<unsigned long long>(async_dropped),
-          static_cast<unsigned long long>(lidar_buffer_drop_count),
-          static_cast<unsigned long long>(imu_buffer_drop_count),
+          "Point-LIO realtime warning: odometry loop overrun. mode=%s loop=%.4f s "
+          "lidar_interval=%.4f s map_update=%.4f s lidar_q=%zu imu_q=%zu odom_overrun=%llu",
+          lio_operation_mode.c_str(), t5 - t0, lidar_time_inte, t5 - t3, lidar_buffer.size(),
+          imu_deque.size(),
           static_cast<unsigned long long>(odom_overrun_count));
-        last_diag_time = diag_now;
       }
 
       /*** Debug variables Logging ***/

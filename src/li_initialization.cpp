@@ -34,6 +34,7 @@ void trim_lidar_buffer_if_needed()
   if (lio_operation_mode == "offline_map") {
     return;
   }
+  bool dropped = false;
   while (
     realtime_max_lidar_queue > 0 &&
     lidar_buffer.size() > static_cast<size_t>(realtime_max_lidar_queue) &&
@@ -42,6 +43,15 @@ void trim_lidar_buffer_if_needed()
     time_buffer.pop_front();
     lidar_buffer_drop_count++;
     lidar_pushed = false;
+    dropped = true;
+  }
+  if (dropped) {
+    RCLCPP_WARN(
+      rclcpp::get_logger("li_initialization"),
+      "Point-LIO realtime warning: dropped old LiDAR frame(s). dropped_lidar=%llu "
+      "lidar_queue=%zu max_lidar_queue=%d",
+      static_cast<unsigned long long>(lidar_buffer_drop_count), lidar_buffer.size(),
+      realtime_max_lidar_queue);
   }
 }
 
@@ -50,12 +60,22 @@ void trim_imu_buffer_if_needed()
   if (lio_operation_mode == "offline_map") {
     return;
   }
+  bool dropped = false;
   while (
     realtime_max_imu_queue > 0 &&
     imu_deque.size() > static_cast<size_t>(realtime_max_imu_queue)) {
     imu_deque.pop_front();
     imu_buffer_drop_count++;
     imu_pushed = false;
+    dropped = true;
+  }
+  if (dropped) {
+    RCLCPP_WARN(
+      rclcpp::get_logger("li_initialization"),
+      "Point-LIO realtime warning: dropped old IMU sample(s). dropped_imu=%llu imu_queue=%zu "
+      "max_imu_queue=%d",
+      static_cast<unsigned long long>(imu_buffer_drop_count), imu_deque.size(),
+      realtime_max_imu_queue);
   }
 }
 
