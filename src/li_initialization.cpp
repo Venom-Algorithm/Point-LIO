@@ -1,4 +1,8 @@
 #include "li_initialization.h"
+
+#include <algorithm>
+#include <cmath>
+
 bool data_accum_finished = false, data_accum_start = false, online_calib_finish = false,
      refine_print = false;
 int frame_num_init = 0;
@@ -28,6 +32,71 @@ uint64_t imu_buffer_drop_count = 0;
 
 namespace
 {
+
+bool imu_wait_warned_for_current_lidar = false;
+bool imu_front_warned_for_current_lidar = false;
+
+double lidar_duration_warn_threshold()
+{
+  if (lidar_time_inte <= 0.0) {
+    return 0.02;
+  }
+  return std::max(0.01, 0.2 * lidar_time_inte);
+}
+
+double imu_sync_warn_threshold()
+{
+  if (imu_time_inte <= 0.0) {
+    return 0.01;
+  }
+  return std::max(0.01, 2.0 * imu_time_inte);
+}
+
+void warn_lidar_duration_if_needed(const double lidar_beg_time, const double lidar_last_time)
+{
+  const double duration = lidar_last_time - lidar_beg_time;
+  const double threshold = lidar_duration_warn_threshold();
+  if (duration <= 0.0 || std::fabs(duration - lidar_time_inte) > threshold) {
+    RCLCPP_WARN(
+      rclcpp::get_logger("li_initialization"),
+      "Point-LIO sync warning: abnormal LiDAR frame duration. duration=%.6f s expected=%.6f "
+      "s threshold=%.6f s lidar_beg=%.6f lidar_end=%.6f",
+      duration, lidar_time_inte, threshold, lidar_beg_time, lidar_last_time);
+  }
+}
+
+void warn_imu_wait_if_needed(const double required_imu_time)
+{
+  if (imu_wait_warned_for_current_lidar) {
+    return;
+  }
+  const double missing = required_imu_time - last_timestamp_imu;
+  if (missing > imu_sync_warn_threshold()) {
+    RCLCPP_WARN(
+      rclcpp::get_logger("li_initialization"),
+      "Point-LIO sync warning: waiting for IMU to cover LiDAR frame end. missing=%.6f s "
+      "lidar_required=%.6f last_imu=%.6f",
+      missing, required_imu_time, last_timestamp_imu);
+    imu_wait_warned_for_current_lidar = true;
+  }
+}
+
+void warn_imu_front_gap_if_needed(const double lidar_beg_time)
+{
+  if (imu_front_warned_for_current_lidar || imu_deque.empty()) {
+    return;
+  }
+  const double imu_front_time = get_time_sec(imu_deque.front()->header.stamp);
+  const double front_gap = imu_front_time - lidar_beg_time;
+  if (front_gap > imu_sync_warn_threshold()) {
+    RCLCPP_WARN(
+      rclcpp::get_logger("li_initialization"),
+      "Point-LIO sync warning: IMU queue starts after LiDAR frame begin. gap=%.6f s "
+      "lidar_beg=%.6f imu_front=%.6f. LiDAR-IMU propagation may be degraded.",
+      front_gap, lidar_beg_time, imu_front_time);
+    imu_front_warned_for_current_lidar = true;
+  }
+}
 
 void trim_lidar_buffer_if_needed()
 {
@@ -262,6 +331,7 @@ bool sync_packages(MeasureGroup & meas)
             }
             lidar_end_time = meas.lidar_beg_time + end_time / double(1000);
             meas.lidar_last_time = lidar_end_time;
+            warn_lidar_duration_if_needed(meas.lidar_beg_time, meas.lidar_last_time);
           }
           lidar_pushed = true;
         }
@@ -302,15 +372,23 @@ bool sync_packages(MeasureGroup & meas)
         lidar_end_time = meas.lidar_beg_time + end_time / double(1000);
         // std::cout << "check time lidar:" << end_time << '\n';
         meas.lidar_last_time = lidar_end_time;
+        warn_lidar_duration_if_needed(meas.lidar_beg_time, meas.lidar_last_time);
       }
+      imu_wait_warned_for_current_lidar = false;
+      imu_front_warned_for_current_lidar = false;
       lidar_pushed = true;
     }
 
     if (!lose_lid && (last_timestamp_imu < lidar_end_time)) {
+      warn_imu_wait_if_needed(lidar_end_time);
       return false;
     }
     if (lose_lid && last_timestamp_imu < meas.lidar_beg_time + lidar_time_inte) {
+      warn_imu_wait_if_needed(meas.lidar_beg_time + lidar_time_inte);
       return false;
+    }
+    if (!lose_lid) {
+      warn_imu_front_gap_if_needed(meas.lidar_beg_time);
     }
 
     if (!lose_lid && !imu_pushed) {
@@ -354,6 +432,8 @@ bool sync_packages(MeasureGroup & meas)
     time_buffer.pop_front();
     lidar_pushed = false;
     imu_pushed = false;
+    imu_wait_warned_for_current_lidar = false;
+    imu_front_warned_for_current_lidar = false;
     return true;
   }
 }
